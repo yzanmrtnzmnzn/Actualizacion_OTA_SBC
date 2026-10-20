@@ -1,0 +1,23 @@
+menu "RETO4"
+
+    config STA_MAX_RETRY
+        int "Reintentos de conexion como cliente"
+        default 5
+
+    config CONNECT_TIMEOUT_MS
+        int "Timeout de conexion como cliente (ms)"
+        default 15000
+
+    config AP_PASSWORD
+        string "Contrasena del Access Point propio"
+        default "config1234"
+
+    config AP_MAX_STA_CONN
+        int "Maximo de clientes conectados al AP"
+        default 4
+
+    config AP_CHANNEL
+        int "Canal WiFi del AP"
+        default 1
+
+endmenu

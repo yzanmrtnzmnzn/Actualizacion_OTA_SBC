@@ -1,0 +1,11 @@
+menu "ThingsBoard"
+
+    config TB_HTTP_TLS
+        bool "Usar HTTPS (en vez de HTTP) en la API HTTP"
+        default n
+
+    config TB_PERIOD_MS
+        int "Periodo de envio de telemetria (ms)"
+        default 500
+
+endmenu

@@ -1,0 +1,9 @@
+POLITICA DE AHORRO ENERGETICO: lectura del ADC bajo demanda.
+
+Antes existia una tarea que leia el ADC cada 500 ms y publicaba el valor,
+aunque solo se enviaba a ThingsBoard cada TB_PERIOD_MS (5 s por defecto):
+9 de cada 10 lecturas se descartaban y la CPU se despertaba 2 veces por segundo.
+
+Ahora NO hay tarea periodica. El ADC solo se lee cuando quien va a enviar el dato
+(MQTT / HTTP) llama a ldr_sensor_read() justo antes de transmitir. Entre envios
+no hay ninguna conversion ni ninguna tarea de este modulo que despierte a la CPU.
