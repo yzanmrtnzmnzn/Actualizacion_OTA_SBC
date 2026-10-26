@@ -11,6 +11,7 @@
 #include "ldr_sensor.h"
 #include <stdlib.h>
 #include "cJSON.h"
+#include "ota_update.h"
 
 static const char *TAG = "tb_mqtt";
 
@@ -22,6 +23,7 @@ static char s_uri[96];
 static esp_mqtt_client_handle_t s_client = NULL;
 static volatile bool s_connected = false;
 static volatile int s_period_ms = CONFIG_TB_PERIOD_MS;
+static volatile bool s_ota_in_progress = false;
 
 int thingsboard_get_period_ms(void)
 {
@@ -31,6 +33,23 @@ int thingsboard_get_period_ms(void)
 void thingsboard_set_period_ms(int ms)
 {
     s_period_ms = ms;
+}
+
+static void ota_update_task(void *arg)
+{
+    (void)arg;
+
+    ESP_LOGI(TAG, "Iniciando comprobacion de actualizacion OTA");
+
+    esp_err_t err = ota_check_and_update();
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Error en la OTA: %s",
+                 esp_err_to_name(err));
+    }
+    s_ota_in_progress = false;
+
+    vTaskDelete(NULL);
 }
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
@@ -94,25 +113,51 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 	        }
 	
 	        if (cJSON_IsString(method) &&
-	            strcmp(method->valuestring, "setInterval") == 0 &&
-	            cJSON_IsNumber(value)) {
-	
-	            int new_period = value->valueint;
-	
-	            if (new_period >= 1000 && new_period <= 60000) {
-	                thingsboard_set_period_ms(new_period);
+		    strcmp(method->valuestring, "setInterval") == 0) {
 
-	                ESP_LOGI(TAG,
-	                         "Nuevo intervalo: %d ms",
-	                         s_period_ms);
-	            } else {
-	                ESP_LOGW(TAG,
-	                         "Intervalo fuera de rango: %d",
-	                         new_period);
-	            }
-	        } else {
-	            ESP_LOGW(TAG, "Metodo o parametros RPC no validos");
-	        }
+		    	if (cJSON_IsNumber(value)) {
+		        	int new_period = value->valueint;
+
+        			if (new_period >= 1000 && new_period <= 60000) {
+            			thingsboard_set_period_ms(new_period);
+
+		            	ESP_LOGI(TAG,"Nuevo intervalo: %d ms",s_period_ms);
+      		  		} else {
+          		  		ESP_LOGW(TAG,"Intervalo fuera de rango: %d",new_period);
+        			}
+    			} else {
+        		ESP_LOGW(TAG,"setInterval necesita un parametro value numerico");
+    			}
+
+				} else if (cJSON_IsString(method) &&
+           		strcmp(method->valuestring, "startOta") == 0) {
+
+    				if (s_ota_in_progress) {
+        				ESP_LOGW(TAG, "Ya hay una OTA en curso");
+       					 break;
+    				}
+
+    				s_ota_in_progress = true;
+
+				    BaseType_t result = xTaskCreate(
+				        ota_update_task,
+				        "ota_update",
+				        8192,
+				        NULL,
+				        5,
+				        NULL
+				    );
+
+    				if (result != pdPASS) {
+        				s_ota_in_progress = false;
+
+        				ESP_LOGE(TAG,"No se pudo crear la tarea OTA");
+    				} else {ESP_LOGI(TAG,"Orden OTA recibida desde ThingsBoard");
+    			}
+
+				} else {
+    				ESP_LOGW(TAG, "Metodo o parametros RPC no validos");
+				}
 	
 	        cJSON_Delete(root);
 	    } else {

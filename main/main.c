@@ -10,6 +10,7 @@
 //#include "bcd_display.h"
 //#include "oled_display.h"
 #include "thingsboard.h"
+#include "ota_update.h"
 
 static const char *TAG = "RETO4";
 
