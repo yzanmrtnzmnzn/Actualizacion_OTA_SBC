@@ -132,7 +132,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
           		  		ESP_LOGW(TAG,"Intervalo fuera de rango: %d",new_period);
         			}
     			} else {
-        		ESP_LOGW(TAG,"setInterval necesita un parametro value numerico");
+        		ESP_LOGW(TAG,"setInterval necesita un parametro value _numerico");
     			}
 
 				} else if (cJSON_IsString(method) &&
