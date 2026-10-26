@@ -19,7 +19,7 @@ static const char *TAG = "OTA";
     "https://github.com/yzanmrtnzmnzn/Actualizacion_OTA_SBC/releases/latest/download/version.txt"
 
 #define OTA_FIRMWARE_URL \
-    "https://github.com/yzanmrtnzmnzn/Actualizacion_OTA_SBC/latest/download/firmware.bin"
+    "https://github.com/yzanmrtnzmnzn/Actualizacion_OTA_SBC/releases/latest/download/Reto6.bin"
 
 #define OTA_VERSION_BUFFER_SIZE 32
 
@@ -80,7 +80,10 @@ static esp_err_t get_latest_version(char *version, size_t size)
         .timeout_ms = 15000,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler = version_http_event_handler,
-        .user_data = &response
+        .user_data = &response,
+        
+        .buffer_size = 5120,
+    	.buffer_size_tx = 2048,
     };
 
     esp_http_client_handle_t client =
@@ -188,7 +191,9 @@ esp_err_t ota_check_and_update(void)
     esp_http_client_config_t http_config = {
         .url = OTA_FIRMWARE_URL,
         .timeout_ms = 30000,
-        .crt_bundle_attach = esp_crt_bundle_attach
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 5120,
+    	.buffer_size_tx = 2048,
     };
 
     esp_https_ota_config_t ota_config = {

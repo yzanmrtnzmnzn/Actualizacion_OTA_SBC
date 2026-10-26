@@ -69,6 +69,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         );
     
         break;
+    case MQTT_EVENT_SUBSCRIBED:
+    	ESP_LOGI(TAG, "Suscripcion MQTT confirmada, msg_id=%d",
+             event->msg_id);
+    	break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
         s_connected = false;
@@ -88,7 +92,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         }
         break;
     
-	case MQTT_EVENT_DATA: {
+	case MQTT_EVENT_DATA: 
+		ESP_LOGI(TAG, "RPC recibido en topic: %.*s", event->topic_len, event->topic);
+         {
 	    char *payload = malloc(event->data_len + 1);
 	
 	    if (payload == NULL) {
@@ -196,7 +202,7 @@ esp_err_t thingsboard_mqtt_init(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = "mqtt://eu.thingsboard.cloud:1883",
-        .credentials.username = "RamlJLJw3oQNoaJrYSbD",
+        .credentials.username = "BPo25jddeDHbnJsezYZz",
     };
 
     s_client = esp_mqtt_client_init(&mqtt_cfg);

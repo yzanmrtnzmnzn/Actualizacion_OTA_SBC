@@ -45,7 +45,7 @@ static void send_telemetry(const app_light_data_t *d)
 {
     char url[192];
     char payload[64];
-    snprintf(url, sizeof(url), "http://eu.thingsboard.cloud/api/v1/2xbFDpWdIJlvoy74eel5/telemetry");
+    snprintf(url, sizeof(url), "http://eu.thingsboard.cloud/api/v1/H59A6sZKYeklokS1Sa0o/telemetry");
     int len = snprintf(payload, sizeof(payload), "{\"adc_raw\":%d,\"franja\":%d}", d->raw, d->franja);
 
     esp_http_client_config_t config = {
