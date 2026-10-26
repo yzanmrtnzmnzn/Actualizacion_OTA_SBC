@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include "cJSON.h"
 #include "ota_update.h"
+#include "nvs.h"
 
 static const char *TAG = "tb_mqtt";
 
@@ -19,11 +20,19 @@ static const char *TAG = "tb_mqtt";
 #define TB_MQTT_TASK_STACK  4096
 #define TB_MQTT_TASK_PRIO   4
 
+#define OTA_AUTO_TASK_STACK          8192
+#define OTA_INTERVAL_DEFAULT_MINUTES 60
+#define OTA_INTERVAL_MIN_MINUTES     1
+#define OTA_INTERVAL_MAX_MINUTES     1440
+
 static char s_uri[96];
 static esp_mqtt_client_handle_t s_client = NULL;
 static volatile bool s_connected = false;
 static volatile int s_period_ms = CONFIG_TB_PERIOD_MS;
 static volatile bool s_ota_in_progress = false;
+static volatile int s_ota_interval_minutes = OTA_INTERVAL_DEFAULT_MINUTES;
+static TaskHandle_t s_ota_auto_task_handle = NULL;
+static portMUX_TYPE s_ota_lock = portMUX_INITIALIZER_UNLOCKED;
 
 int thingsboard_get_period_ms(void)
 {
@@ -33,6 +42,81 @@ int thingsboard_get_period_ms(void)
 void thingsboard_set_period_ms(int ms)
 {
     s_period_ms = ms;
+}
+
+
+
+static void load_ota_interval(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("tb_config", NVS_READONLY, &handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "Usando intervalo OTA por defecto: %d minutos",
+                 OTA_INTERVAL_DEFAULT_MINUTES);
+        return;
+    }
+
+    uint32_t minutes = OTA_INTERVAL_DEFAULT_MINUTES;
+
+    err = nvs_get_u32(handle, "ota_minutes", &minutes);
+    nvs_close(handle);
+
+    if (err == ESP_OK &&
+        minutes >= OTA_INTERVAL_MIN_MINUTES &&
+        minutes <= OTA_INTERVAL_MAX_MINUTES) {
+
+        s_ota_interval_minutes = (int)minutes;
+    }
+
+    ESP_LOGI(TAG, "Intervalo OTA configurado: %d minutos",
+             s_ota_interval_minutes);
+}
+
+
+static esp_err_t save_ota_interval(uint32_t minutes)
+{
+    nvs_handle_t handle;
+
+    esp_err_t err = nvs_open("tb_config", NVS_READWRITE, &handle);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_u32(handle, "ota_minutes", minutes);
+
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+
+static bool ota_try_start(void)
+{
+    bool can_start = false;
+
+    portENTER_CRITICAL(&s_ota_lock);
+
+    if (!s_ota_in_progress) {
+        s_ota_in_progress = true;
+        can_start = true;
+    }
+
+    portEXIT_CRITICAL(&s_ota_lock);
+
+    return can_start;
+}
+
+
+static void ota_finish(void)
+{
+    portENTER_CRITICAL(&s_ota_lock);
+    s_ota_in_progress = false;
+    portEXIT_CRITICAL(&s_ota_lock);
 }
 
 static void ota_update_task(void *arg)
@@ -47,11 +131,55 @@ static void ota_update_task(void *arg)
         ESP_LOGE(TAG, "Error en la OTA: %s",
                  esp_err_to_name(err));
     }
-    s_ota_in_progress = false;
+    ota_finish();
 
     vTaskDelete(NULL);
 }
 
+static void ota_auto_check_task(void *arg)
+{
+    (void)arg;
+
+    while (1) {
+
+        int interval_minutes = s_ota_interval_minutes;
+
+        uint32_t wait_ms =
+            (uint32_t)interval_minutes * 60U * 1000U;
+
+        ESP_LOGI(TAG,
+                 "Proxima comprobacion OTA en %d minutos",
+                 interval_minutes);
+        uint32_t notification = ulTaskNotifyTake(
+            pdTRUE,
+            pdMS_TO_TICKS(wait_ms)
+        );
+
+        if (notification > 0) {
+            ESP_LOGI(TAG,
+                     "Intervalo OTA modificado; reiniciando la espera");
+            continue;
+        }
+
+        if (!ota_try_start()) {
+            ESP_LOGW(TAG,
+                     "Comprobacion OTA omitida: ya hay una OTA en curso");
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Iniciando comprobacion OTA automatica");
+
+        esp_err_t err = ota_check_and_update();
+
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "Error en la comprobacion OTA automatica: %s",
+                     esp_err_to_name(err));
+        }
+
+        ota_finish();
+    }
+}
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32, base, event_id);
@@ -110,60 +238,112 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 	    cJSON *root = cJSON_Parse(payload);
 	
 	    if (root != NULL) {
-	        cJSON *method = cJSON_GetObjectItem(root, "method");
-	        cJSON *params = cJSON_GetObjectItem(root, "params");
-	        cJSON *value = NULL;
+			cJSON *method = cJSON_GetObjectItemCaseSensitive(root, "method");
+			cJSON *params = cJSON_GetObjectItemCaseSensitive(root, "params");
+			cJSON *value = NULL;
+			
+			if (cJSON_IsObject(params)) {
+			    value = cJSON_GetObjectItemCaseSensitive(params, "value");
+			}
+			
+			ESP_LOGI(TAG, "RPC: params_type=%d, value_type=%d, value=%d",
+			         params != NULL ? params->type : -1,
+			         value != NULL ? value->type : -1,
+			         cJSON_IsNumber(value) ? value->valueint : -1);
 	
-	        if (cJSON_IsObject(params)) {
-	            value = cJSON_GetObjectItem(params, "value");
-	        }
-	
-	        if (cJSON_IsString(method) &&
-		    strcmp(method->valuestring, "setInterval") == 0) {
-
-		    	if (cJSON_IsNumber(value)) {
-		        	int new_period = value->valueint;
-
-        			if (new_period >= 1000 && new_period <= 60000) {
-            			thingsboard_set_period_ms(new_period);
-
-		            	ESP_LOGI(TAG,"Nuevo intervalo: %d ms",s_period_ms);
-      		  		} else {
-          		  		ESP_LOGW(TAG,"Intervalo fuera de rango: %d",new_period);
-        			}
-    			} else {
-        		ESP_LOGW(TAG,"setInterval necesita un parametro value _numerico");
-    			}
-
-				} else if (cJSON_IsString(method) &&
-           		strcmp(method->valuestring, "startOta") == 0) {
-
-    				if (s_ota_in_progress) {
-        				ESP_LOGW(TAG, "Ya hay una OTA en curso");
-       					 break;
-    				}
-
-    				s_ota_in_progress = true;
-
-				    BaseType_t result = xTaskCreate(
-				        ota_update_task,
-				        "ota_update",
-				        8192,
-				        NULL,
-				        5,
-				        NULL
-				    );
-
-    				if (result != pdPASS) {
-        				s_ota_in_progress = false;
-
-        				ESP_LOGE(TAG,"No se pudo crear la tarea OTA");
-    				} else {ESP_LOGI(TAG,"Orden OTA recibida desde ThingsBoard");
-    			}
-
-				} else {
-    				ESP_LOGW(TAG, "Metodo o parametros RPC no validos");
-				}
+			if (cJSON_IsString(method) &&
+			    strcmp(method->valuestring, "setInterval") == 0) {
+			
+			    if (cJSON_IsNumber(value)) {
+			
+			        int new_period = value->valueint;
+			
+			        if (new_period >= 1000 && new_period <= 60000) {
+			            thingsboard_set_period_ms(new_period);
+			
+			            ESP_LOGI(TAG, "Nuevo intervalo de telemetria: %d ms",
+			                     new_period);
+			        } else {
+			            ESP_LOGW(TAG, "Intervalo de telemetria fuera de rango: %d",
+			                     new_period);
+			        }
+			
+			    } else {
+			        ESP_LOGW(TAG,
+			                 "setInterval necesita un parametro value numerico");
+			    }
+			
+			} else if (cJSON_IsString(method) &&
+			           strcmp(method->valuestring, "setOtaInterval") == 0) {
+			
+			    if (cJSON_IsNumber(value)) {
+			
+			        int new_interval = value->valueint;
+			
+			        if (new_interval >= OTA_INTERVAL_MIN_MINUTES &&
+			            new_interval <= OTA_INTERVAL_MAX_MINUTES) {
+			
+			            s_ota_interval_minutes = new_interval;
+			
+			            esp_err_t save_err =
+			                save_ota_interval((uint32_t)new_interval);
+			
+			            if (save_err != ESP_OK) {
+			                ESP_LOGE(TAG,
+			                         "No se pudo guardar el intervalo OTA: %s",
+			                         esp_err_to_name(save_err));
+			            }
+			
+			            
+			            if (s_ota_auto_task_handle != NULL) {
+			                xTaskNotifyGive(s_ota_auto_task_handle);
+			            }
+			
+			            ESP_LOGI(TAG,
+			                     "Nuevo intervalo de comprobacion OTA: %d minutos",
+			                     new_interval);
+			
+			        } else {
+			            ESP_LOGW(TAG,
+			                     "Intervalo OTA fuera de rango: %d minutos",
+			                     new_interval);
+			        }
+			
+			    } else {
+			        ESP_LOGW(TAG,
+			                 "setOtaInterval necesita un parametro value numerico");
+			    }
+			
+			} else if (cJSON_IsString(method) &&
+			           strcmp(method->valuestring, "startOta") == 0) {
+			
+			    if (!ota_try_start()) {
+			
+			        ESP_LOGW(TAG, "Ya hay una OTA en curso");
+			
+			    } else {
+			
+			        BaseType_t result = xTaskCreate(
+			            ota_update_task,
+			            "ota_update",
+			            8192,
+			            NULL,
+			            5,
+			            NULL
+			        );
+			
+			        if (result != pdPASS) {
+			            ota_finish();
+			
+			            ESP_LOGE(TAG, "No se pudo crear la tarea OTA");
+			        } else {
+			            ESP_LOGI(TAG, "Orden OTA recibida desde ThingsBoard");
+			        }
+			    }
+			
+			} else {
+			    ESP_LOGW(TAG, "Metodo o parametros RPC no validos");
+			}
 	
 	        cJSON_Delete(root);
 	    } else {
@@ -216,6 +396,36 @@ esp_err_t thingsboard_mqtt_init(void)
         return err;
     }
 
-    ESP_LOGI(TAG, "Cliente MQTT hacia %s iniciado", s_uri);
-    return (xTaskCreate(mqtt_publish_task, "tb_mqtt_task", TB_MQTT_TASK_STACK, NULL, TB_MQTT_TASK_PRIO, NULL) == pdPASS) ? ESP_OK : ESP_FAIL;
+		ESP_LOGI(TAG, "Cliente MQTT iniciado");
+		
+		/* Tarea que envia la telemetria. */
+		if (xTaskCreate(
+		        mqtt_publish_task,
+		        "tb_mqtt_task",
+		        TB_MQTT_TASK_STACK,
+		        NULL,
+		        TB_MQTT_TASK_PRIO,
+		        NULL
+		    ) != pdPASS) {
+		
+		    ESP_LOGE(TAG, "No se pudo crear la tarea MQTT");
+		    return ESP_FAIL;
+		}
+		
+		/* Tarea que comprueba automaticamente si hay una nueva OTA. */
+		if (xTaskCreate(
+		        ota_auto_check_task,
+		        "ota_auto_check",
+		        OTA_AUTO_TASK_STACK,
+		        NULL,
+		        4,
+		        &s_ota_auto_task_handle
+		    ) != pdPASS) {
+		
+		    ESP_LOGE(TAG, "No se pudo crear la tarea de comprobacion OTA");
+		    return ESP_FAIL;
+		}
+		
+		ESP_LOGI(TAG, "Comprobacion OTA automatica activada");
+		return ESP_OK;
 }
